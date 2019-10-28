@@ -197,6 +197,7 @@ class Request:
         self.payloads = payloads or []
         self.request_meta = request_meta or RequestMeta()
         self.errors = errors or []
+        self.plugins_to_run_cache: Dict[str, Set[str]] = {}
 
     def __str__(self) -> str:
         return helpers.dumps(self)
