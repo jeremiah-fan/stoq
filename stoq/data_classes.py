@@ -109,9 +109,6 @@ class Payload:
             extracted_by=extracted_by,
         )
 
-    def __str__(self):
-        return str(self.results.payload_id)
-
     def __repr__(self):
         return repr(self.__dict__)
 

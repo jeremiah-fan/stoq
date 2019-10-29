@@ -36,7 +36,7 @@ from stoq.data_classes import (
 import stoq.tests.utils as utils
 
 
-class TestCore(asynctest.TestCase): # type: ignore
+class TestCore(asynctest.TestCase):
     def setUp(self) -> None:
         logging.disable(logging.CRITICAL)
         self.generic_content = b'The quick brown fox'  # type: ignore
@@ -680,23 +680,23 @@ class TestCore(asynctest.TestCase): # type: ignore
         # Construct a fake stoq_response as if it were generated from a file
         # A.zip that contains two files, B.txt and C.zip, where C.zip contains D.txt
         results = [
-            Payload(content=b"", payload_id="A.zip", payload_meta=PayloadMeta()),
+            Payload(content=b'', payload_id="A.zip", payload_meta=PayloadMeta()),
             Payload(
-                content=b"",
+                content=b'',
                 payload_id="B.txt",
                 payload_meta=PayloadMeta(),
                 extracted_from="A.zip",
                 extracted_by="fake",
             ),
             Payload(
-                content=b"",
+                content=b'',
                 payload_id="C.zip",
                 payload_meta=PayloadMeta(),
                 extracted_from="A.zip",
                 extracted_by="fake",
             ),
             Payload(
-                content=b"",
+                content=b'',
                 payload_id="D.txt",
                 payload_meta=PayloadMeta(),
                 extracted_from="C.zip",

@@ -352,7 +352,6 @@ from stoq.plugins import (
     WorkerPlugin,
 )
 
-
 # Created to enable `None' as a valid paramater
 _UNSET = object()
 
