@@ -22,7 +22,7 @@ from stoq.plugins import WorkerPlugin
 
 
 class ExtractPayload(WorkerPlugin):
-    EXTRACTED_PAYLOAD = b''
+    EXTRACTED_PAYLOAD = None
 
     async def scan(
         self, payload: Payload, request: Request
