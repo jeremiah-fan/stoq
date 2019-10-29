@@ -304,51 +304,53 @@
 
 """
 
-import asyncio
-import configparser
-import logging
 import os
+import asyncio
+import logging
+import configparser
 from collections import defaultdict
+from pythonjsonlogger import jsonlogger  # type: ignore
 from logging.handlers import RotatingFileHandler
 from typing import (
-    AsyncGenerator,
     Awaitable,
     Coroutine,
-    DefaultDict,
     Dict,
+    AsyncGenerator,
     List,
     Optional,
     Set,
     Tuple,
+    DefaultDict,
     Union,
 )
 
-import stoq.helpers as helpers
-from pythonjsonlogger import jsonlogger  # type: ignore
+
+from .exceptions import StoqException
 from stoq.data_classes import (
-    ArchiverResponse,
-    DecoratorResponse,
-    DispatcherResponse,
     Error,
+    ExtractedPayload,
     Payload,
     PayloadMeta,
     PayloadResults,
     Request,
     RequestMeta,
     StoqResponse,
+    ArchiverResponse,
+    DispatcherResponse,
+    DecoratorResponse,
     WorkerResponse,
 )
+
+import stoq.helpers as helpers
+from stoq.utils import ratelimited
 from stoq.plugin_manager import StoqPluginManager
 from stoq.plugins import (
+    DispatcherPlugin,
     ArchiverPlugin,
     ConnectorPlugin,
     DecoratorPlugin,
-    DispatcherPlugin,
     WorkerPlugin,
 )
-from stoq.utils import ratelimited
-
-from .exceptions import StoqException
 
 
 # Created to enable `None' as a valid paramater
@@ -409,10 +411,10 @@ class Stoq(StoqPluginManager):
             'core', 'provider_consumers', fallback=50
         )
         self.max_recursion = max_recursion or config.getint(
-            'core', 'max_recursion', fallback=3
+            'core', 'max_recursion', fallback=10
         )
         self.max_required_worker_depth = max_required_worker_depth or config.getint(
-            'core', 'max_required_worker_depth', fallback=3
+            'core', 'max_required_worker_depth', fallback=10
         )
 
         if log_dir is _UNSET:
@@ -541,7 +543,7 @@ class Stoq(StoqPluginManager):
 
         add_start_dispatch: List[str] = add_start_dispatch or []
         scan_queue: List[Tuple[Payload, List[str]]] = []
-        deferred: Set[Tuple[Payload, WorkerPlugin]] = set()
+        deferred_tasks: Set[Tuple[Payload, WorkerPlugin]] = set()
 
         hashes_seen: DefaultDict[str, List] = defaultdict(list)
         for idx, payload in enumerate(request.payloads):
@@ -552,24 +554,24 @@ class Stoq(StoqPluginManager):
             hashes_seen[sha].append(idx)
 
         for _recursion_level in range(self.max_recursion + 1):
-            if len(scan_queue) <= 0 and len(deferred) <= 0:
+            if len(scan_queue) <= 0 and len(deferred_tasks) <= 0:
                 break
 
             # Commence worker round
             self.log.debug(f'Current payload recursion depth: {_recursion_level}')
             next_scan_queue: List[Tuple[Payload, List[str]]] = []
-            next_deferred: Set[Tuple[Payload, WorkerPlugin]] = set()
+            next_deferred_tasks: Set[Tuple[Payload, WorkerPlugin]] = set()
 
             nested_worker_tasks: List[
                 Set[Tuple[Payload, WorkerPlugin]]
             ] = await asyncio.gather(
                 *[
-                    self._generate_tasks(payload, add_dispatch, request)
+                    self._get_all_plugins(payload, add_dispatch, request)
                     for payload, add_dispatch in scan_queue
                     if payload.results.payload_meta.should_scan
                 ]
             )
-            nested_worker_tasks.append(deferred)
+            nested_worker_tasks.append(deferred_tasks)
 
             tasks = []
             for worker_tasks in nested_worker_tasks:
@@ -578,15 +580,15 @@ class Stoq(StoqPluginManager):
                         continue
 
                     if self._worker_task_can_start(payload, plugin):
-                        tasks.append(self._single_scan(payload, plugin, request))
+                        tasks.append(self._scan_payload(payload, plugin, request))
                     else:
-                        next_deferred.add((payload, plugin))
+                        next_deferred_tasks.add((payload, plugin))
 
             self.log.debug(f'Tasks in round {_recursion_level + 1}: {tasks}')
-            self.log.debug(f'Deferred to future executions: {next_deferred}')
+            self.log.debug(f'Deferred to future executions: {next_deferred_tasks}')
 
             # TODO: Add option for no-dedup
-            nested_extracted_results = await asyncio.gather(*tasks)
+            nested_extracted_results: List[List[ExtractedPayload]] = await asyncio.gather(*tasks)
             for extracted_results in nested_extracted_results:
                 for extracted_result in extracted_results:
                     ex_hash = helpers.get_sha256(extracted_result.content)
@@ -621,7 +623,7 @@ class Stoq(StoqPluginManager):
                             )
 
             scan_queue = next_scan_queue
-            deferred = next_deferred
+            deferred_tasks = next_deferred_tasks
 
         archive_tasks: List = []
         for payload in request.payloads:
@@ -728,9 +730,9 @@ class Stoq(StoqPluginManager):
             except asyncio.QueueEmpty:
                 pass
 
-    async def _single_scan(
+    async def _scan_payload(
         self, payload: Payload, plugin: WorkerPlugin, request: Request
-    ) -> List[Payload]:
+    ) -> List[ExtractedPayload]:
         self.log.debug(
             f'Scanning Payload {payload.results.payload_id} with WorkerPlugin {plugin.plugin_name}'
         )
@@ -752,7 +754,7 @@ class Stoq(StoqPluginManager):
         payload.results.plugins_run['workers'].append(plugin.plugin_name)
 
         if not worker_response:
-            return list()
+            return []
 
         if worker_response.errors:
             request.errors.extend(worker_response.errors)
@@ -760,20 +762,15 @@ class Stoq(StoqPluginManager):
         if worker_response.results:
             payload.results.workers[plugin.plugin_name] = worker_response.results
 
-        extracted = [
-            Payload(
-                content=ex.content,
-                payload_meta=ex.payload_meta,
-                extracted_by=plugin.plugin_name,
-                extracted_from=payload.results.payload_id,
-            )
-            for ex in worker_response.extracted
-        ]
+        for extracted_payload in worker_response.extracted:
+            extracted_payload.results.extracted_by = [plugin.plugin_name]
+            extracted_payload.results.extracted_from = [payload.results.payload_id]
+
         self.log.debug(
             f'Completed scan of {payload.results.payload_id} with {len(payload.results.workers)} results, '
-            f'{len(extracted)} extracted payloads'
+            f'{len(worker_response.extracted)} extracted payloads'
         )
-        return extracted
+        return worker_response.extracted
 
     async def _apply_archiver(
         self, archiver: ArchiverPlugin, payload: Payload, request: Request
@@ -802,48 +799,48 @@ class Stoq(StoqPluginManager):
             if archiver_response.results is not None:
                 payload.results.archivers[archiver.plugin_name] = archiver_response.results
 
-    async def _generate_tasks(
+    async def _get_all_plugins(
         self, payload: Payload, add_dispatch: List[str], request: Request
     ) -> Set[Tuple[Payload, WorkerPlugin]]:
-        tot_dispatched_workers: Set[str] = set(add_dispatch).union(self.always_dispatch)
-        dispatch_results: List[Set[str]] = await asyncio.gather(
+        # Run all dispatchers to form our initial set of worker plugins to run
+        dispatched_workers: Set[str] = set(add_dispatch).union(self.always_dispatch)
+        dispatcher_plugin_results: List[Set[str]] = await asyncio.gather(
             *[
                 self._get_dispatched_plugin_names(dispatcher, payload, request)
                 for dispatcher in self._loaded_dispatcher_plugins.values()
             ]
         )
-        for dispatched_workers in dispatch_results:
-            tot_dispatched_workers.update(dispatched_workers)
+        for dispatcher_plugin_result in dispatcher_plugin_results:
+            dispatched_workers.update(dispatcher_plugin_result)
 
-        tasks: Set[Tuple[Payload, WorkerPlugin]] = set()
-        for dispatched_worker in tot_dispatched_workers:
+        # Resolve dependencies for each worker plugin that we want to run
+        all_worker_plugins_to_run: Set[Tuple[Payload, WorkerPlugin]] = set()
+        for worker_plugin_name in dispatched_workers:
             # Check cache
-            plugins_to_run_cache = request.plugins_to_run_cache.get(dispatched_worker)
-            if plugins_to_run_cache:
+            plugins_resolved_dependencies_cached = request.resolved_plugin_dependency_cache.get(worker_plugin_name)
+            if plugins_resolved_dependencies_cached:
                 # Cache hit
-                self.log.debug(f'Cache hit for all plugins to run for {dispatched_worker}: {plugins_to_run_cache}')
-                all_generated_plugins: Set[WorkerPlugin] = {
+                self.log.debug(f'Cache hit for all plugins to run for {worker_plugin_name}: {plugins_resolved_dependencies_cached}')
+                plugins_resolved_dependencies: Set[WorkerPlugin] = {
                     self.load_plugin(plugin_name)
-                    for plugin_name in plugins_to_run_cache
+                    for plugin_name in plugins_resolved_dependencies_cached
                 }
             else:
-                # Cache miss, resolve dependency chain
-                all_generated_plugins: Set[WorkerPlugin] = self._generate_plugins(
-                    payload, dispatched_worker, request, set()
+                # Cache miss, must resolve dependency chain
+                plugins_resolved_dependencies: Set[WorkerPlugin] = self._resolve_plugin_dependencies(
+                    payload, worker_plugin_name, request, set()
                 )
-                request.plugins_to_run_cache[dispatched_worker] = [
-                    plugin.plugin_name
-                    for plugin in all_generated_plugins
+                request.resolved_plugin_dependency_cache[worker_plugin_name] = [
+                    plugin.plugin_name for plugin in plugins_resolved_dependencies
                 ]
 
-            if len(all_generated_plugins) == 0: # Error was already recorded
-                continue
+            all_worker_plugins_to_run.update(
+                (payload, plugin)
+                for plugin in plugins_resolved_dependencies
+            )
+        return all_worker_plugins_to_run
 
-            tasks.update((payload, plugin) for plugin in all_generated_plugins)
-
-        return tasks
-
-    def _generate_plugins(
+    def _resolve_plugin_dependencies(
         self,
         payload: Payload,
         plugin_name: str,
@@ -889,8 +886,8 @@ class Stoq(StoqPluginManager):
             )
             return set()
 
-        all_generated_plugins: Set[WorkerPlugin] = set()
-        all_generated_plugins.add(plugin)
+        total_plugins_resolved_dependencies: Set[WorkerPlugin] = set()
+        total_plugins_resolved_dependencies.add(plugin)
         if len(plugin.required_plugin_names) != 0:
             plugin_dependency_chain = init_plugin_dependency_chain.copy()
             plugin_dependency_chain.add(plugin_name)
@@ -899,18 +896,18 @@ class Stoq(StoqPluginManager):
                 f'{plugin_name} has dependencies of {", ".join(plugin.required_plugin_names)}'
             )
             for required_plugin_name in plugin.required_plugin_names:
-                generated_plugins = self._generate_plugins(
+                plugins_resolved_dependencies = self._resolve_plugin_dependencies(
                     payload,
                     required_plugin_name,
                     request,
                     plugin_dependency_chain,
                     depth + 1,
                 )
-                if len(generated_plugins) == 0: # Bubble up failure
+                if len(plugins_resolved_dependencies) == 0: # Bubble up failure
                     return set()
 
-                all_generated_plugins.update(generated_plugins)
-        return all_generated_plugins
+                total_plugins_resolved_dependencies.update(plugins_resolved_dependencies)
+        return total_plugins_resolved_dependencies
 
     def _worker_task_can_start(self, payload: Payload, worker_plugin: WorkerPlugin):
         for required_plugin_name in worker_plugin.required_plugin_names:

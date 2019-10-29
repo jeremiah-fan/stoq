@@ -109,6 +109,9 @@ class Payload:
             extracted_by=extracted_by,
         )
 
+    def __str__(self):
+        return str(self.results.payload_id)
+
     def __repr__(self):
         return repr(self.__dict__)
 
@@ -197,7 +200,7 @@ class Request:
         self.payloads = payloads or []
         self.request_meta = request_meta or RequestMeta()
         self.errors = errors or []
-        self.plugins_to_run_cache: Dict[str, Set[str]] = {}
+        self.resolved_plugin_dependency_cache: Dict[str, Set[str]] = {}
 
     def __str__(self) -> str:
         return helpers.dumps(self)
@@ -252,27 +255,22 @@ class StoqResponse:
         return repr(self.__dict__)
 
 
-class ExtractedPayload:
-    def __init__(
-        self, content: bytes, payload_meta: Optional[PayloadMeta] = None
-    ) -> None:
-        """
+class ExtractedPayload(Payload):
+    """
 
-        Object to store extracted payloads for further analysis
+    Object to store extracted payloads for further analysis
 
-        :param content: Raw bytes of extracted payload
-        :param payload_meta: ``PayloadMeta`` object containing metadata about extracted payload
+    :param content: Raw bytes of extracted payload
+    :param payload_meta: ``PayloadMeta`` object containing metadata about extracted payload
 
-        >>> src = '/tmp/bad.exe'
-        >>> data = open(src, 'rb').read()
-        >>> extra_data = {'source': src}
-        >>> extracted_meta = PayloadMeta(should_archive=True, extra_data=extra_data)
-        >>> extracted_payload = ExtractedPayload(content=data, payload_meta=extracted_meta)
+    >>> src = '/tmp/bad.exe'
+    >>> data = open(src, 'rb').read()
+    >>> extra_data = {'source': src}
+    >>> extracted_meta = PayloadMeta(should_archive=True, extra_data=extra_data)
+    >>> extracted_payload = ExtractedPayload(content=data, payload_meta=extracted_meta)
 
-        """
-
-        self.content = content
-        self.payload_meta: PayloadMeta = PayloadMeta() if payload_meta is None else payload_meta
+    """
+    pass
 
 
 class WorkerResponse:
