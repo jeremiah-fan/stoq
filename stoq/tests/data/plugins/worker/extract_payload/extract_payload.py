@@ -17,19 +17,31 @@
 import os
 from typing import Optional
 
-from stoq.data_classes import ExtractedPayload, Payload, Request, WorkerResponse
+from stoq.data_classes import (
+    ExtractedPayload,
+    Payload,
+    PayloadMeta,
+    Request,
+    WorkerResponse,
+)
 from stoq.plugins import WorkerPlugin
 
 
 class ExtractPayload(WorkerPlugin):
     EXTRACTED_PAYLOAD = None
+    SHOULD_ARCHIVE = True
 
     async def scan(
         self, payload: Payload, request: Request
     ) -> Optional[WorkerResponse]:
         if self.EXTRACTED_PAYLOAD:
             return WorkerResponse(
-                extracted=[ExtractedPayload(self.EXTRACTED_PAYLOAD)]  # type: ignore
+                extracted=[
+                    ExtractedPayload(
+                        self.EXTRACTED_PAYLOAD,
+                        payload_meta=PayloadMeta(should_archive=self.SHOULD_ARCHIVE),
+                    )
+                ]  # type: ignore
             )
         else:
             return WorkerResponse(extracted=[ExtractedPayload(os.urandom(50))])

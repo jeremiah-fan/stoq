@@ -437,6 +437,22 @@ class TestCore(asynctest.TestCase):
         self.assertIn('file_save_id', response.results[0].archivers['simple_archiver'])
         self.assertEqual(len(response.errors), 0)
 
+    async def test_archiver_dedup(self):
+        s = Stoq(base_dir=utils.get_data_dir(), dest_archivers=['dummy_archiver'])
+
+        payload_content = self.generic_content
+        extract_payload = s.load_plugin('extract_payload')
+        extract_payload.EXTRACTED_PAYLOAD = payload_content
+        extract_payload.SHOULD_ARCHIVE = True
+
+        response = await s.scan(
+            payload_content,
+            payload_meta=PayloadMeta(should_archive=False),
+            add_start_dispatch=["extract_payload"],
+        )
+
+        self.assertIn('dummy_archiver', response.results[0].plugins_run["archivers"])
+
     async def test_archiver_not_in_results(self):
         s = Stoq(base_dir=utils.get_data_dir(), dest_archivers=['dummy_archiver'])
         response = await s.scan(

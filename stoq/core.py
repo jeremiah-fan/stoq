@@ -585,14 +585,14 @@ class Stoq(StoqPluginManager):
         )
 
         add_dispatches: Set[Tuple[Payload, str]] = set()
-        hashes_seen: DefaultDict[str, List] = defaultdict(list)
+        hashes_seen: Dict[str, int] = {}
         for idx, payload in enumerate(request.payloads):
             if payload.results.payload_meta.should_scan and add_start_dispatch:
                 for plugin_name in add_start_dispatch:
                     add_dispatches.add((payload, plugin_name))
 
             sha = helpers.get_sha256(payload.content)
-            hashes_seen[sha].append(idx)
+            hashes_seen[sha] = idx
 
         for _recursion_level in range(1, self.max_recursion + 1):
             self.log.debug(f'Beginning worker round {_recursion_level}')
@@ -613,7 +613,7 @@ class Stoq(StoqPluginManager):
                     )
 
                     request.payloads.append(extracted_payload)
-                    hashes_seen[payload_hash].append(len(request.payloads) - 1)
+                    hashes_seen[payload_hash] = len(request.payloads) - 1
 
                     payload_meta = extracted_payload.results.payload_meta
                     if _recursion_level >= self.max_recursion:
@@ -630,13 +630,18 @@ class Stoq(StoqPluginManager):
                         )
                 else:
                     payload_idx = hashes_seen[payload_hash]
-                    for idx in payload_idx:
-                        request.payloads[idx].results.extracted_by.extend(
-                            extracted_payload.results.extracted_by
-                        )
-                        request.payloads[idx].results.extracted_from.extend(
-                            extracted_payload.results.extracted_from
-                        )
+                    original_payload = request.payloads[payload_idx]
+
+                    original_payload.results.payload_meta.should_archive = (
+                        original_payload.results.payload_meta.should_archive
+                        or extracted_payload.results.payload_meta.should_archive
+                    )
+                    original_payload.results.extracted_by.extend(
+                        extracted_payload.results.extracted_by
+                    )
+                    original_payload.results.extracted_from.extend(
+                        extracted_payload.results.extracted_from
+                    )
 
         archive_tasks: List = []
         if request.request_meta.archive_payloads:
